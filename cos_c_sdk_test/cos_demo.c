@@ -7,7 +7,8 @@
 #include <unistd.h>
 
 // endpoint 是 COS 访问域名信息，详情请参见 https://cloud.tencent.com/document/product/436/6224 文档
-static char TEST_COS_ENDPOINT[] = "cos.ap-guangzhou.myqcloud.com";
+// 示例为内网域名, 在外网环境切换为https://cos.ap-region.tencentcos.cn
+static char TEST_COS_ENDPOINT[] = "https://cos-internal.ap-guangzhou.tencentcos.cn";  
 // 数据万象的访问域名，详情请参见 https://cloud.tencent.com/document/product/460/31066 文档
 static char TEST_CI_ENDPOINT[] = "https://ci.ap-guangzhou.myqcloud.com";
 // 开发者拥有的项目身份ID/密钥，可在 https://console.cloud.tencent.com/cam/capi 页面获取
@@ -20,6 +21,7 @@ static char TEST_BUCKET_NAME[] = "<bucketname-appid>";
 // 对象拥有者，比如用户UIN：100000000001
 static char TEST_UIN[] = "<Uin>";    //your uin
 // 地域信息，枚举值可参见 https://cloud.tencent.com/document/product/436/6224 文档，例如：ap-beijing、ap-hongkong、eu-frankfurt 等
+// 当endpoint为空时，才会使用region参数，sdk内部自动组合endpoint
 static char TEST_REGION[] = "ap-guangzhou";    //region in endpoint
 // 对象键，对象（Object）在存储桶（Bucket）中的唯一标识。有关对象与对象键的进一步说明，请参见 https://cloud.tencent.com/document/product/436/13324 文档
 static char TEST_OBJECT_NAME1[] = "1.txt";
@@ -59,7 +61,11 @@ static void print_headers(cos_table_t *headers)
 
 void init_test_config(cos_config_t *config, int is_cname)
 {
+    // endpoint不为空使用endpoint，推荐使用https://cos-internal.ap-region.tencentcos.cn新域名
     cos_str_set(&config->endpoint, TEST_COS_ENDPOINT);
+    // endpoint为空时才使用region，配合enable_old_domain disable_internal_domain use_http参数使用,
+    // 默认为https cos-internal内网新域名后缀tencentcos.cn
+    cos_str_set(&config->region, TEST_REGION);
     cos_str_set(&config->access_key_id, TEST_ACCESS_KEY_ID);
     cos_str_set(&config->access_key_secret, TEST_ACCESS_KEY_SECRET);
     cos_str_set(&config->appid, TEST_APPID);
@@ -763,7 +769,7 @@ void multipart_upload_file_from_file()
     complete_headers = cos_table_make(p, 1);
     cos_str_set(&bucket, TEST_BUCKET_NAME);
     cos_str_set(&object, TEST_MULTIPART_OBJECT);
-    
+
     //init mulitipart
     s = cos_init_multipart_upload(options, &bucket, &object, 
                                   &upload_id, headers, &resp_headers);

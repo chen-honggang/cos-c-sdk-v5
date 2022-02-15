@@ -139,6 +139,15 @@ typedef enum {
 
 typedef struct {
     cos_string_t endpoint;
+    // when the endpoint is empty, use the following configuration
+    // region start with “ap-”
+    cos_string_t region;
+    // use the old domain suffix : myqcloud.com
+    int enable_old_domain;
+    // disable domain that style like cos-internal
+    int disable_internal_domain;
+    int use_http;
+
     cos_string_t access_key_id;
     cos_string_t access_key_secret;
     cos_string_t appid;

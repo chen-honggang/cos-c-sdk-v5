@@ -122,6 +122,7 @@ static char *cos_invaild_params_error_msg[] = {
     "bucket is null or empty, please check it",
     "ak is start with space or end with space, please check it",
     "sk is start with space or end with space, please check it",
+    "region is not start with ap-, please check it",
 };
 
 static uintptr_t ignore_bucket_check_ptr = -1;
@@ -143,39 +144,6 @@ static int is_ak_or_sk_valid(cos_string_t *str)
     return COS_TRUE;
 }
 
-static int is_config_params_vaild(const cos_request_options_t *options,
-                                  const cos_string_t *bucket,
-                                  char **error_msg)
-{
-    if (cos_is_null_string(&options->config->endpoint)) {
-        *error_msg = cos_invaild_params_error_msg[0];
-        cos_error_log("config params invaild, msg: %s", *error_msg);
-        return COS_FALSE;
-    }
-    if (cos_is_null_string(&options->config->appid)) {
-        *error_msg = cos_invaild_params_error_msg[1];
-        cos_error_log("config params invaild, msg: %s", *error_msg);
-        return COS_FALSE;
-    }
-    if ((uintptr_t)bucket != ignore_bucket_check_ptr && cos_is_null_string(bucket)) {
-        *error_msg = cos_invaild_params_error_msg[2];
-        cos_error_log("config params invaild, msg: %s", *error_msg);
-        return COS_FALSE;
-    }
-    if (!is_ak_or_sk_valid(&options->config->access_key_id)) {
-        *error_msg = cos_invaild_params_error_msg[3];
-        cos_error_log("config params invaild, msg: %s", *error_msg);
-        return COS_FALSE;
-    }
-    if (!is_ak_or_sk_valid(&options->config->access_key_secret)) {
-        *error_msg = cos_invaild_params_error_msg[4];
-        cos_error_log("config params invaild, msg: %s", *error_msg);
-        return COS_FALSE;
-    }
-
-    return COS_TRUE;
-}
-
 int starts_with(const cos_string_t *str, const char *prefix) {
     uint32_t i;
     if(NULL != str && prefix && str->len > 0 && strlen(prefix)) {
@@ -185,6 +153,38 @@ int starts_with(const cos_string_t *str, const char *prefix) {
         return 1;
     }
     return 0;
+}
+
+static int is_config_params_vaild(const cos_request_options_t *options,
+                                  const cos_string_t *bucket,
+                                  char **error_msg)
+{
+    if ((uintptr_t)bucket != ignore_bucket_check_ptr && cos_is_null_string(bucket)) {
+        *error_msg = cos_invaild_params_error_msg[2];
+        cos_error_log("config params invaild, msg: %s", *error_msg);
+        return COS_FALSE;
+    }
+
+    if (!is_ak_or_sk_valid(&options->config->access_key_id)) {
+        *error_msg = cos_invaild_params_error_msg[3];
+        cos_error_log("config params invaild, msg: %s", *error_msg);
+        return COS_FALSE;
+    }
+
+    if (!is_ak_or_sk_valid(&options->config->access_key_secret)) {
+        *error_msg = cos_invaild_params_error_msg[4];
+        cos_error_log("config params invaild, msg: %s", *error_msg);
+        return COS_FALSE;
+    }
+
+    if ((!cos_is_null_string(&options->config->region)) && 
+        (!starts_with(&options->config->region, "ap-"))) {
+        *error_msg = cos_invaild_params_error_msg[5];
+        cos_error_log("config params invaild, msg: %s", *error_msg);
+        return COS_FALSE;
+    }
+
+    return COS_TRUE;
 }
 
 static void generate_proto(const cos_request_options_t *options, 
@@ -261,6 +261,55 @@ void cos_set_request_route(cos_http_controller_t *ctl, char *host_ip, int host_p
     ctl->options->host_port = host_port;
 }
 
+static void cos_get_splice_endpoint(const cos_request_options_t *options,
+                                    cos_http_request_t *req,
+                                    const char **proto,
+                                    cos_string_t *raw_endpoint,
+                                    const char **raw_endpoint_str)
+{
+    cos_string_t cos_domain;
+    cos_string_t domain_suffix;
+
+    if (options->config->enable_old_domain) {
+        cos_str_set(&domain_suffix, ".myqcloud.com");
+        // The old domain name only supports the "cos." domain name format
+        cos_str_set(&cos_domain, "cos.");
+    } else {
+        cos_str_set(&domain_suffix, ".tencentcos.cn");
+
+        if (options->config->disable_internal_domain) {
+            cos_str_set(&cos_domain, "cos.");
+        } else {
+            cos_str_set(&cos_domain, "cos-internal.");
+        }
+    }
+
+    if (options->config->use_http) {
+        if (req) {
+            req->proto = COS_HTTP_PREFIX;
+        }
+        if (proto) {
+            *proto = COS_HTTP_PREFIX;
+        }
+    } else {
+        if (req) {
+            req->proto = COS_HTTPS_PREFIX;
+        }
+        if (proto) {
+            *proto = COS_HTTPS_PREFIX;
+        }
+    }
+
+    raw_endpoint->len = cos_domain.len + options->config->region.len + domain_suffix.len;
+    raw_endpoint->data = apr_psprintf(options->pool, "%.*s%.*s%.*s", 
+                                        cos_domain.len, cos_domain.data,
+                                        options->config->region.len, options->config->region.data,
+                                        domain_suffix.len, domain_suffix.data);
+    if (raw_endpoint_str) {
+        *raw_endpoint_str = raw_endpoint->data;
+    }
+}
+
 int cos_get_service_uri(const cos_request_options_t *options,
                          const int all_region,
                          cos_http_request_t *req,
@@ -268,6 +317,7 @@ int cos_get_service_uri(const cos_request_options_t *options,
 {
     int32_t proto_len;
     cos_string_t raw_endpoint;
+    int splice_endpoint = COS_FALSE;
 
     // check params
     if (!is_config_params_vaild(options, (cos_string_t *)ignore_bucket_check_ptr, error_msg)) {
@@ -276,11 +326,24 @@ int cos_get_service_uri(const cos_request_options_t *options,
 
     generate_proto(options, req);
     if (all_region == 1) {
-        req->host = apr_psprintf(options->pool, "%s", "service.cos.myqcloud.com");
+        req->host = apr_psprintf(options->pool, "%s", "service.cos.tencentcos.cn");
     } else {
-        proto_len = strlen(req->proto);
-        raw_endpoint.len = options->config->endpoint.len - proto_len;
-        raw_endpoint.data = options->config->endpoint.data + proto_len;
+        if (cos_is_null_string(&options->config->endpoint)) {
+            if (cos_is_null_string(&options->config->region)) {
+                return COS_FALSE;
+            }
+            splice_endpoint = COS_TRUE;
+        }
+
+        if (!splice_endpoint) {
+            proto_len = strlen(req->proto);
+            raw_endpoint.len = options->config->endpoint.len - proto_len;
+            raw_endpoint.data = options->config->endpoint.data + proto_len;
+        } else {
+            // get service does not support internal domain currently, force disable here
+            options->config->disable_internal_domain = COS_TRUE;
+            cos_get_splice_endpoint(options, req, NULL, &raw_endpoint, NULL);
+        }
         req->host = apr_psprintf(options->pool, "%.*s", raw_endpoint.len, raw_endpoint.data);
     }
 
@@ -325,18 +388,30 @@ int cos_get_object_uri(const cos_request_options_t *options,
     const char *raw_endpoint_str;
     cos_string_t raw_endpoint;
     int32_t bucket_has_appid = 0;
+    int splice_endpoint = COS_FALSE;
 
     // check params
     if (!is_config_params_vaild(options, bucket, error_msg)) {
         return COS_FALSE;
     }
 
-    generate_proto(options, req);
+    if (cos_is_null_string(&options->config->endpoint)) {
+        if (cos_is_null_string(&options->config->region)) {
+            return COS_FALSE;
+        }
+        splice_endpoint = COS_TRUE;
+    }
 
-    proto_len = strlen(req->proto);
-    raw_endpoint_str = cos_pstrdup(options->pool, &options->config->endpoint) + proto_len;
-    raw_endpoint.len = options->config->endpoint.len - proto_len;
-    raw_endpoint.data = options->config->endpoint.data + proto_len;
+    if (!splice_endpoint) {
+        generate_proto(options, req);
+
+        proto_len = strlen(req->proto);
+        raw_endpoint_str = cos_pstrdup(options->pool, &options->config->endpoint) + proto_len;
+        raw_endpoint.len = options->config->endpoint.len - proto_len;
+        raw_endpoint.data = options->config->endpoint.data + proto_len;
+    } else {
+        cos_get_splice_endpoint(options, req, NULL, &raw_endpoint, &raw_endpoint_str);
+    }
    
     req->resource = apr_psprintf(options->pool, "%.*s", 
                                  object->len, object->data);
@@ -386,16 +461,28 @@ const char *cos_gen_object_url(const cos_request_options_t *options,
     char uristr[3*COS_MAX_URI_LEN+1];
     cos_string_t raw_endpoint;
     int32_t bucket_has_appid = 0;
+    int splice_endpoint = COS_FALSE;
 
-    proto = starts_with(&options->config->endpoint, COS_HTTP_PREFIX) ?
-        COS_HTTP_PREFIX : "";
-    proto = starts_with(&options->config->endpoint, COS_HTTPS_PREFIX) ?
-        COS_HTTPS_PREFIX : proto;
+    if (cos_is_null_string(&options->config->endpoint)) {
+        if (cos_is_null_string(&options->config->region)) {
+            return COS_FALSE;
+        }
+        splice_endpoint = COS_TRUE;
+    }
 
-    proto_len = strlen(proto);
-    raw_endpoint_str = cos_pstrdup(options->pool, &options->config->endpoint) + proto_len;
-    raw_endpoint.len = options->config->endpoint.len - proto_len;
-    raw_endpoint.data = options->config->endpoint.data + proto_len;
+    if (!splice_endpoint) {
+        proto = starts_with(&options->config->endpoint, COS_HTTP_PREFIX) ?
+            COS_HTTP_PREFIX : "";
+        proto = starts_with(&options->config->endpoint, COS_HTTPS_PREFIX) ?
+            COS_HTTPS_PREFIX : proto;
+
+        proto_len = strlen(proto);
+        raw_endpoint_str = cos_pstrdup(options->pool, &options->config->endpoint) + proto_len;
+        raw_endpoint.len = options->config->endpoint.len - proto_len;
+        raw_endpoint.data = options->config->endpoint.data + proto_len;
+    } else {
+        cos_get_splice_endpoint(options, NULL, &proto, &raw_endpoint, &raw_endpoint_str);
+    }
 
     if (options->config->is_cname || 
             is_valid_ip(raw_endpoint_str))
@@ -438,56 +525,10 @@ int cos_get_bucket_uri(const cos_request_options_t *options,
                         cos_http_request_t *req,
                         char **error_msg)
 {
-    int32_t proto_len;
-    const char *raw_endpoint_str;
-    cos_string_t raw_endpoint;
-    int32_t bucket_has_appid = 0;
+    cos_string_t object;
+    cos_str_set(&object, "");
 
-    // check params
-    if (!is_config_params_vaild(options, bucket, error_msg)) {
-        return COS_FALSE;
-    }
-
-    generate_proto(options, req);
-
-    proto_len = strlen(req->proto);
-    raw_endpoint_str = cos_pstrdup(options->pool, &options->config->endpoint) + proto_len;
-    raw_endpoint.len = options->config->endpoint.len - proto_len;
-    raw_endpoint.data = options->config->endpoint.data + proto_len;
-
-    req->resource = apr_psprintf(options->pool, "%s", "");
-    
-    if (options->config->is_cname || 
-        is_valid_ip(raw_endpoint_str))
-    {
-        req->host = apr_psprintf(options->pool, "%.*s", 
-                                raw_endpoint.len, raw_endpoint.data);
-    } else {
-        if (options->config->appid.len == 0 || strcmp(options->config->appid.data, "") == 0) {
-            bucket_has_appid = 1;
-        }
-        else {
-            if (cos_ends_with(bucket, &options->config->appid) && bucket->len > options->config->appid.len) {
-                if (bucket->data[bucket->len - options->config->appid.len - 1] == '-') {
-                    bucket_has_appid = 1;
-                }
-            }
-        }
-        if (bucket_has_appid) {
-            req->host = apr_psprintf(options->pool, "%.*s.%.*s", 
-                                     bucket->len, bucket->data,
-                                     raw_endpoint.len, raw_endpoint.data);
-        }
-        else {
-            req->host = apr_psprintf(options->pool, "%.*s-%.*s.%.*s", 
-                                     bucket->len, bucket->data,
-                                     options->config->appid.len, options->config->appid.data,
-                                     raw_endpoint.len, raw_endpoint.data);
-        }
-    }
-    req->uri = apr_psprintf(options->pool, "%s", "");
-
-    return COS_TRUE;
+    return cos_get_object_uri(options, bucket, &object, req, error_msg);
 }
 
 #if 0
